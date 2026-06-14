@@ -14,13 +14,13 @@ nixPkgs = [
     "php83Extensions.fileinfo",
     "php83Extensions.openssl",
     "php83Extensions.intl",
-    "composer",
     "nodejs_22",
     "npm"
 ]
 
 [phases.install]
 cmds = [
+    "curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer",
     "composer install --no-dev --optimize-autoloader",
     "npm ci",
     "npm run build",
@@ -35,4 +35,4 @@ cmds = [
 ]
 
 [start]
-cmd = "php artisan migrate --force && php artisan db:seed --force --class=DatabaseSeeder && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT"
+cmd = "php artisan migrate --force && php artisan db:seed --force && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT"
