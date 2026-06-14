@@ -1,11 +1,30 @@
 [phases.setup]
-nixPkgs = ["php83", "php83Extensions.pdo_mysql", "php83Extensions.mbstring", "php83Extensions.xml", "php83Extensions.curl", "php83Extensions.zip", "php83Extensions.gd", "php83Extensions.tokenizer", "php83Extensions.fileinfo", "php83Extensions.openssl", "composer", "nodejs_22", "npm"]
+nixPkgs = [
+    "php83",
+    "php83Extensions.pdo",
+    "php83Extensions.pdo_pgsql",
+    "php83Extensions.pdo_mysql",
+    "php83Extensions.pdo_sqlite",
+    "php83Extensions.mbstring",
+    "php83Extensions.xml",
+    "php83Extensions.curl",
+    "php83Extensions.zip",
+    "php83Extensions.gd",
+    "php83Extensions.tokenizer",
+    "php83Extensions.fileinfo",
+    "php83Extensions.openssl",
+    "php83Extensions.intl",
+    "composer",
+    "nodejs_22",
+    "npm"
+]
 
 [phases.install]
 cmds = [
     "composer install --no-dev --optimize-autoloader",
     "npm ci",
-    "npm run build"
+    "npm run build",
+    "npx playwright install chromium --with-deps"
 ]
 
 [phases.build]
@@ -16,4 +35,4 @@ cmds = [
 ]
 
 [start]
-cmd = "php artisan migrate --force && php artisan db:seed --force && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT"
+cmd = "php artisan migrate --force && php artisan db:seed --force --class=DatabaseSeeder && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT"
