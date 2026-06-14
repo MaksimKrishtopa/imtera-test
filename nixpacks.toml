@@ -14,8 +14,7 @@ nixPkgs = [
     "php83Extensions.fileinfo",
     "php83Extensions.openssl",
     "php83Extensions.intl",
-    "nodejs_22",
-    "npm"
+    "nodejs_22"
 ]
 
 [phases.install]
