@@ -125,7 +125,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { useOrganizationStore } from '@/stores/organization';
@@ -150,12 +150,38 @@ const lastPage = ref(1);
 const reviewsLoading = ref(false);
 const reviewsError = ref('');
 
+let pollInterval = null;
+
+function startPolling() {
+  if (pollInterval) return;
+  pollInterval = setInterval(async () => {
+    await orgStore.fetch();
+    if (org.value?.parse_status === 'done') {
+      stopPolling();
+      await loadReviews(1);
+    } else if (org.value?.parse_status === 'error') {
+      stopPolling();
+    }
+  }, 5000);
+}
+
+function stopPolling() {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+}
+
+onUnmounted(() => stopPolling());
+
 onMounted(async () => {
   await orgStore.fetch();
   if (org.value) {
     urlInput.value = org.value.url;
     if (org.value.parse_status === 'done') {
       await loadReviews(1);
+    } else if (org.value.parse_status === 'processing') {
+      startPolling();
     }
   }
 });
@@ -175,7 +201,12 @@ async function handleSave() {
 async function handleParse() {
   try {
     await orgStore.parse();
-    await loadReviews(1);
+    // parse now dispatches job and returns 202 — start polling for completion
+    if (org.value?.parse_status === 'processing') {
+      startPolling();
+    } else if (org.value?.parse_status === 'done') {
+      await loadReviews(1);
+    }
   } catch (e) {
     // error shown in org section
   }

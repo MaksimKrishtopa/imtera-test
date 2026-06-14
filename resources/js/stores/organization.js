@@ -43,15 +43,20 @@ export const useOrganizationStore = defineStore('organization', () => {
         parsing.value = true;
         error.value = null;
         try {
+            // Returns 202 Accepted immediately — job is queued
             const { data } = await api.post('/organization/parse');
             organization.value = data;
             return data;
         } catch (e) {
+            // 409 = already processing, not a real error
+            if (e.response?.status === 409) {
+                if (e.response?.data?.organization) {
+                    organization.value = e.response.data.organization;
+                }
+                return organization.value;
+            }
             const msg = e.response?.data?.message || 'Ошибка парсинга';
             error.value = msg;
-            if (e.response?.data?.organization) {
-                organization.value = e.response.data.organization;
-            }
             throw new Error(msg);
         } finally {
             parsing.value = false;

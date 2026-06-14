@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ParseOrganizationJob;
 use App\Models\Organization;
 use App\Services\YandexMapsParser;
 use Illuminate\Http\JsonResponse;
@@ -58,6 +59,10 @@ class OrganizationController extends Controller
         return response()->json($this->formatOrganization($org), 201);
     }
 
+    /**
+     * Dispatch a background parsing job and return 202 Accepted immediately.
+     * The client should poll GET /api/organization to track parse_status.
+     */
     public function parse(Request $request): JsonResponse
     {
         $org = $request->user()->organization;
@@ -67,20 +72,17 @@ class OrganizationController extends Controller
         }
 
         if ($org->parse_status === 'processing') {
-            return response()->json(['message' => 'Парсинг уже выполняется.'], 409);
+            return response()->json([
+                'message' => 'Парсинг уже выполняется.',
+                'organization' => $this->formatOrganization($org),
+            ], 409);
         }
 
-        try {
-            $this->parser->parse($org);
-            $org->refresh();
-            return response()->json($this->formatOrganization($org));
-        } catch (\Throwable $e) {
-            $org->refresh();
-            return response()->json([
-                'message' => $e->getMessage(),
-                'organization' => $this->formatOrganization($org),
-            ], 422);
-        }
+        $org->update(['parse_status' => 'processing', 'parse_error' => null]);
+
+        ParseOrganizationJob::dispatch($org);
+
+        return response()->json($this->formatOrganization($org->refresh()), 202);
     }
 
     private function formatOrganization(Organization $org): array

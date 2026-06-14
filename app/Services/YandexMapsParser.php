@@ -4,98 +4,53 @@ namespace App\Services;
 
 use App\Models\Organization;
 use App\Models\Review;
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Support\Facades\Log;
 
 class YandexMapsParser
 {
-    private Client $http;
-
-    private const REVIEWS_PER_PAGE = 50;
     private const MAX_REVIEWS = 600;
-    private const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
-    public function __construct()
-    {
-        $this->http = new Client([
-            'timeout' => 30,
-            'connect_timeout' => 10,
-            'headers' => [
-                'User-Agent' => self::USER_AGENT,
-                'Accept' => 'application/json, text/javascript, */*; q=0.01',
-                'Accept-Language' => 'ru-RU,ru;q=0.9,en;q=0.8',
-                'Accept-Encoding' => 'gzip, deflate, br',
-                'Connection' => 'keep-alive',
-            ],
-            'verify' => false,
-        ]);
-    }
 
     /**
      * Extract Yandex organization ID from a Maps URL.
-     * Supports formats:
+     * Supports formats like:
      * - https://yandex.ru/maps/org/name/1234567890/
-     * - https://yandex.com/maps/org/name/1234567890/
-     * - https://yandex.ru/maps/-/anything
-     * - https://2gis.ru/ (not supported, throws)
+     * - https://yandex.com/maps/org/1234567890/
+     * - https://yandex.ru/maps/?oid=1234567890
      */
     public function extractOrgId(string $url): string
     {
-        if (!preg_match('#yandex\.(ru|com|by|kz|uz)#', $url)) {
-            throw new \InvalidArgumentException('Ссылка должна быть на Яндекс.Карты (yandex.ru или yandex.com).');
+        if (!preg_match('#yandex\.(ru|com|by|kz|uz|eu)#', $url)) {
+            throw new \InvalidArgumentException('Ссылка должна вести на Яндекс.Карты (yandex.ru или yandex.com).');
         }
 
-        // Pattern: /maps/org/{name}/{id}/ or /maps/{city}/org/{id}/
-        if (preg_match('#/org/[^/]+/(\d{10,20})#', $url, $m)) {
+        // Pattern: /maps/org/{name}/{id}/ or /maps/{city}/{id}/
+        if (preg_match('#/org/[^/]*/(\d{7,20})#', $url, $m)) {
             return $m[1];
         }
 
-        // Pattern: oid= query param
+        // Pattern: /org/{id}/ (no slug)
+        if (preg_match('#/org/(\d{7,20})#', $url, $m)) {
+            return $m[1];
+        }
+
+        // Pattern: ?oid= query param
         $parsed = parse_url($url);
         if (!empty($parsed['query'])) {
             parse_str($parsed['query'], $query);
-            if (!empty($query['oid'])) {
+            if (!empty($query['oid']) && is_numeric($query['oid'])) {
                 return $query['oid'];
             }
         }
 
-        // Try to fetch the page and extract from meta/json
-        return $this->extractOrgIdFromPage($url);
+        throw new \InvalidArgumentException(
+            'Не удалось извлечь ID организации из URL. ' .
+            'URL должен быть в формате: https://yandex.ru/maps/org/название/ID/'
+        );
     }
 
     /**
-     * Fetch page HTML and extract org ID from embedded JSON state.
-     */
-    private function extractOrgIdFromPage(string $url): string
-    {
-        try {
-            $response = $this->http->get($url, [
-                'headers' => [
-                    'Referer' => 'https://yandex.ru/maps/',
-                ],
-            ]);
-            $html = (string) $response->getBody();
-        } catch (GuzzleException $e) {
-            throw new \RuntimeException('Не удалось загрузить страницу организации: ' . $e->getMessage());
-        }
-
-        // Try extracting from JSON embedded in page
-        if (preg_match('/"businessId"\s*:\s*"?(\d+)"?/', $html, $m)) {
-            return $m[1];
-        }
-        if (preg_match('/"id"\s*:\s*"(\d{10,20})"/', $html, $m)) {
-            return $m[1];
-        }
-        if (preg_match('/oid=(\d+)/', $html, $m)) {
-            return $m[1];
-        }
-
-        throw new \RuntimeException('Не удалось определить ID организации из ссылки. Проверьте, что ссылка ведёт на карточку организации.');
-    }
-
-    /**
-     * Parse organization info and all reviews, save to DB.
+     * Parse organization reviews and info, save to database.
+     * Uses Node.js + Playwright for bot-protection bypass.
      */
     public function parse(Organization $organization): void
     {
@@ -105,45 +60,42 @@ class YandexMapsParser
             $orgId = $this->extractOrgId($organization->url);
             $organization->update(['yandex_id' => $orgId]);
 
-            // Fetch first batch to get org info + initial reviews
-            $firstBatch = $this->fetchReviewsBatch($orgId, 0, self::REVIEWS_PER_PAGE);
+            $result = $this->runNodeScraper($orgId, self::MAX_REVIEWS);
 
-            $orgInfo = $firstBatch['orgInfo'] ?? [];
-            $organization->update([
-                'name' => $orgInfo['name'] ?? null,
-                'rating' => $orgInfo['rating'] ?? null,
-                'reviews_count' => $orgInfo['reviews_count'] ?? null,
-                'ratings_count' => $orgInfo['ratings_count'] ?? null,
-            ]);
+            // Save org info
+            $orgInfo = $result['org_info'] ?? [];
+            if (!empty($orgInfo['name']) || !empty($orgInfo['rating'])) {
+                $organization->update([
+                    'name' => $orgInfo['name'] ?? $organization->name,
+                    'rating' => $orgInfo['rating'] ?? null,
+                    'reviews_count' => $orgInfo['reviews_count'] ?? null,
+                    'ratings_count' => $orgInfo['ratings_count'] ?? null,
+                ]);
+            }
 
-            // Delete old reviews and save new ones
+            // Delete old reviews and save new batch
             $organization->reviews()->delete();
-            $this->saveReviews($organization->id, $firstBatch['reviews']);
+            $reviews = $result['reviews'] ?? [];
 
-            $totalFetched = count($firstBatch['reviews']);
-            $totalAvailable = $orgInfo['reviews_count'] ?? $totalFetched;
-            $offset = self::REVIEWS_PER_PAGE;
+            foreach ($reviews as $reviewData) {
+                $this->createReview($organization->id, $reviewData);
+            }
 
-            // Paginate through remaining reviews
-            while ($totalFetched < min($totalAvailable, self::MAX_REVIEWS) && $offset < self::MAX_REVIEWS) {
-                usleep(500000); // 0.5s delay to be polite
-
-                $batch = $this->fetchReviewsBatch($orgId, $offset, self::REVIEWS_PER_PAGE);
-                if (empty($batch['reviews'])) {
-                    break;
-                }
-
-                $this->saveReviews($organization->id, $batch['reviews']);
-                $totalFetched += count($batch['reviews']);
-                $offset += self::REVIEWS_PER_PAGE;
+            // Update reviews_count if not set from org_info
+            if (!$organization->reviews_count && count($reviews) > 0) {
+                $organization->update(['reviews_count' => count($reviews)]);
             }
 
             $organization->update([
                 'parse_status' => 'done',
                 'parsed_at' => now(),
             ]);
+
         } catch (\Throwable $e) {
-            Log::error('YandexMapsParser error', ['url' => $organization->url, 'error' => $e->getMessage()]);
+            Log::error('YandexMapsParser error', [
+                'url' => $organization->url,
+                'error' => $e->getMessage(),
+            ]);
             $organization->update([
                 'parse_status' => 'error',
                 'parse_error' => $e->getMessage(),
@@ -153,179 +105,121 @@ class YandexMapsParser
     }
 
     /**
-     * Fetch a batch of reviews from Yandex internal API.
-     * Tries multiple endpoint strategies.
+     * Run the Node.js Playwright scraper script.
+     * Uses a temp file for output to avoid proc_open stream issues on Windows.
      */
-    private function fetchReviewsBatch(string $orgId, int $offset, int $limit): array
+    private function runNodeScraper(string $orgId, int $maxReviews): array
     {
-        // Strategy 1: Yandex Maps internal business reviews API
-        try {
-            return $this->fetchViaBusinessApi($orgId, $offset, $limit);
-        } catch (\Throwable $e) {
-            Log::warning('YandexMaps strategy 1 failed', ['error' => $e->getMessage()]);
+        $scriptPath = str_replace('/', DIRECTORY_SEPARATOR, base_path('scripts/scrape-reviews.cjs'));
+
+        if (!file_exists($scriptPath)) {
+            throw new \RuntimeException('Скрипт парсера не найден: ' . $scriptPath);
         }
 
-        // Strategy 2: Yandex Sprav API
-        try {
-            return $this->fetchViaSpravApi($orgId, $offset, $limit);
-        } catch (\Throwable $e) {
-            Log::warning('YandexMaps strategy 2 failed', ['error' => $e->getMessage()]);
+        $outFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'yandex_scraper_' . $orgId . '_' . getmypid() . '.json';
+
+        // Build command with output redirected to temp file
+        $isWindows = PHP_OS_FAMILY === 'Windows';
+        if ($isWindows) {
+            $cmd = sprintf(
+                'cmd /c node %s %s %s > %s 2>&1',
+                escapeshellarg($scriptPath),
+                escapeshellarg($orgId),
+                escapeshellarg((string) $maxReviews),
+                escapeshellarg($outFile)
+            );
+        } else {
+            $cmd = sprintf(
+                'node %s %s %s > %s 2>&1',
+                escapeshellarg($scriptPath),
+                escapeshellarg($orgId),
+                escapeshellarg((string) $maxReviews),
+                escapeshellarg($outFile)
+            );
         }
 
-        throw new \RuntimeException('Не удалось получить отзывы. Яндекс заблокировал запрос или изменил API.');
-    }
+        Log::info('Running node scraper', ['orgId' => $orgId, 'outFile' => $outFile]);
 
-    /**
-     * Strategy 1: Internal Yandex Maps business API.
-     */
-    private function fetchViaBusinessApi(string $orgId, int $offset, int $limit): array
-    {
-        $url = 'https://yandex.ru/maps/api/business/fetchReviews';
+        $timeout = 300;
+        $start = time();
 
-        $response = $this->http->get($url, [
-            'query' => [
-                'businessId' => $orgId,
-                'from' => $offset,
-                'limit' => $limit,
-                'rating' => 0,
-                'csrfToken' => '',
-                'sessionId' => '',
-            ],
-            'headers' => [
-                'Referer' => "https://yandex.ru/maps/org/{$orgId}/reviews/",
-                'X-Requested-With' => 'XMLHttpRequest',
-            ],
-        ]);
+        $process = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null);
 
-        $data = json_decode((string) $response->getBody(), true);
-
-        if (!$data) {
-            throw new \RuntimeException('Пустой ответ от Яндекс API');
+        if (!is_resource($process)) {
+            throw new \RuntimeException('Не удалось запустить скрипт парсера.');
         }
 
-        return $this->normalizeBusinessApiResponse($data, $orgId);
-    }
+        fclose($pipes[0]);
+        // stdout/stderr both go to file via shell redirect, just drain in case
+        fclose($pipes[1]);
+        fclose($pipes[2]);
 
-    /**
-     * Strategy 2: Yandex Sprav (справочник) API.
-     */
-    private function fetchViaSpravApi(string $orgId, int $offset, int $limit): array
-    {
-        $url = "https://yandex.ru/maps/-/api/business/{$orgId}/reviews";
+        while (true) {
+            $status = proc_get_status($process);
+            if (!$status['running']) break;
 
-        $response = $this->http->get($url, [
-            'query' => [
-                'from' => $offset,
-                'limit' => $limit,
-            ],
-            'headers' => [
-                'Referer' => "https://yandex.ru/maps/org/{$orgId}/reviews/",
-            ],
-        ]);
+            if (time() - $start > $timeout) {
+                proc_terminate($process);
+                @unlink($outFile);
+                throw new \RuntimeException('Парсинг завершился по таймауту (' . $timeout . ' сек).');
+            }
 
-        $data = json_decode((string) $response->getBody(), true);
-
-        if (!$data) {
-            throw new \RuntimeException('Пустой ответ от Sprav API');
+            sleep(1);
         }
 
-        return $this->normalizeSpravApiResponse($data, $orgId);
-    }
+        proc_close($process);
 
-    private function normalizeBusinessApiResponse(array $data, string $orgId): array
-    {
-        $orgInfo = [];
-        $reviews = [];
-
-        // Extract org metadata
-        if (!empty($data['data']['businessRating'])) {
-            $rating = $data['data']['businessRating'];
-            $orgInfo = [
-                'name' => $data['data']['name'] ?? null,
-                'rating' => isset($rating['stars']) ? (float) $rating['stars'] : null,
-                'reviews_count' => $rating['reviewCount'] ?? $rating['reviews_count'] ?? null,
-                'ratings_count' => $rating['ratingCount'] ?? $rating['ratings_count'] ?? null,
-            ];
-        } elseif (!empty($data['data']['rating'])) {
-            $orgInfo = [
-                'name' => $data['data']['name'] ?? null,
-                'rating' => (float) $data['data']['rating'],
-                'reviews_count' => $data['data']['reviewsCount'] ?? null,
-                'ratings_count' => $data['data']['ratingsCount'] ?? null,
-            ];
+        if (!file_exists($outFile)) {
+            throw new \RuntimeException('Скрипт парсера не создал выходной файл.');
         }
 
-        // Extract reviews
-        $rawReviews = $data['data']['reviews'] ?? $data['reviews'] ?? [];
-        foreach ($rawReviews as $r) {
-            $reviews[] = $this->normalizeReview($r);
+        $stdout = trim(file_get_contents($outFile));
+        @unlink($outFile);
+
+        if (empty($stdout)) {
+            throw new \RuntimeException('Парсер не вернул данные.');
         }
 
-        return ['orgInfo' => $orgInfo, 'reviews' => $reviews];
-    }
-
-    private function normalizeSpravApiResponse(array $data, string $orgId): array
-    {
-        $orgInfo = [];
-        $reviews = [];
-
-        if (!empty($data['rating'])) {
-            $orgInfo = [
-                'name' => $data['name'] ?? null,
-                'rating' => (float) ($data['rating']['value'] ?? $data['rating']),
-                'reviews_count' => $data['rating']['reviewCount'] ?? $data['reviewCount'] ?? null,
-                'ratings_count' => $data['rating']['ratingCount'] ?? $data['ratingCount'] ?? null,
-            ];
-        }
-
-        $rawReviews = $data['reviews'] ?? $data['data'] ?? [];
-        foreach ($rawReviews as $r) {
-            $reviews[] = $this->normalizeReview($r);
-        }
-
-        return ['orgInfo' => $orgInfo, 'reviews' => $reviews];
-    }
-
-    private function normalizeReview(array $r): array
-    {
-        $author = $r['author'] ?? $r['user'] ?? [];
-
-        $text = $r['text'] ?? $r['comment'] ?? null;
-        if (is_array($text)) {
-            $text = implode(' ', $text);
-        }
-
-        $rating = $r['rating'] ?? $r['stars'] ?? null;
-        if (is_array($rating)) {
-            $rating = $rating['value'] ?? null;
-        }
-
-        $date = $r['updatedTime'] ?? $r['date'] ?? $r['time'] ?? $r['createdTime'] ?? null;
-        $parsedDate = null;
-        if ($date) {
-            try {
-                $parsedDate = is_numeric($date)
-                    ? \Carbon\Carbon::createFromTimestamp((int)$date)
-                    : \Carbon\Carbon::parse($date);
-            } catch (\Throwable) {
-                $parsedDate = null;
+        // Find the JSON line (last non-empty line in case of debug output before it)
+        $lines = array_filter(array_map('trim', explode("\n", $stdout)));
+        $jsonLine = '';
+        foreach (array_reverse(array_values($lines)) as $line) {
+            if (str_starts_with($line, '{')) {
+                $jsonLine = $line;
+                break;
             }
         }
 
-        return [
-            'author_name' => $author['name'] ?? $r['userName'] ?? 'Аноним',
-            'author_avatar' => $author['avatarUrl'] ?? $author['avatar'] ?? null,
-            'rating' => $rating ? (int) $rating : null,
-            'text' => $text,
-            'reviewed_at' => $parsedDate,
-            'yandex_review_id' => (string) ($r['id'] ?? $r['reviewId'] ?? ''),
-        ];
+        if (!$jsonLine) {
+            throw new \RuntimeException('Неверный формат ответа от парсера: ' . substr($stdout, 0, 300));
+        }
+
+        $data = json_decode($jsonLine, true);
+        if ($data === null) {
+            throw new \RuntimeException('Неверный JSON от парсера: ' . substr($jsonLine, 0, 200));
+        }
+
+        if (isset($data['error'])) {
+            throw new \RuntimeException('Ошибка парсера: ' . $data['error']);
+        }
+
+        if (empty($data['reviews'])) {
+            Log::warning('Node scraper returned no reviews', ['orgId' => $orgId]);
+        }
+
+        return $data;
     }
 
-    private function saveReviews(int $organizationId, array $reviews): void
+    private function createReview(int $organizationId, array $data): void
     {
-        foreach ($reviews as $reviewData) {
-            Review::create(array_merge($reviewData, ['organization_id' => $organizationId]));
-        }
+        Review::create([
+            'organization_id' => $organizationId,
+            'author_name' => $data['author_name'] ?? 'Аноним',
+            'author_avatar' => $data['author_avatar'] ?? null,
+            'rating' => isset($data['rating']) ? (int) $data['rating'] : null,
+            'text' => $data['text'] ?? null,
+            'reviewed_at' => $data['reviewed_at'] ? \Carbon\Carbon::parse($data['reviewed_at']) : null,
+            'yandex_review_id' => $data['yandex_review_id'] ?? null,
+        ]);
     }
 }
