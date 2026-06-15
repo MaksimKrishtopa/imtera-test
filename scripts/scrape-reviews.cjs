@@ -151,19 +151,30 @@ async function extractOrgInfo(page) {
 }
 
 async function scrollReviewsList(page) {
-    await page.evaluate(() => {
-        const container = (
-            document.querySelector('.scroll__container') ||
-            document.querySelector('[class*="business-reviews-card-view__reviews-container"]') ||
-            document.querySelector('.sidebar-panel__content') ||
-            document.querySelector('[class*="panel__content"]')
-        );
-        if (container && container.scrollHeight > container.clientHeight + 50) {
-            container.scrollTop += 3000;
-        } else {
-            window.scrollBy(0, 3000);
+    // Use physical mouse wheel events — they reliably trigger Yandex's
+    // IntersectionObserver/scroll handlers even in --single-process mode
+    // (where programmatic scrollTop mutations sometimes don't fire events).
+
+    // First move the mouse over the reviews sidebar so the wheel targets it
+    const panelSelector =
+        '.scroll__container, ' +
+        '[class*="business-reviews-card-view__reviews-container"], ' +
+        '.sidebar-panel__content, ' +
+        '[class*="panel__content"]';
+
+    const panel = await page.$(panelSelector);
+    if (panel) {
+        const box = await panel.boundingBox();
+        if (box) {
+            await page.mouse.move(
+                box.x + box.width / 2,
+                box.y + box.height / 2,
+            );
         }
-    });
+    }
+
+    // Dispatch a large wheel scroll
+    await page.mouse.wheel(0, 3000);
 }
 
 async function scrapeReviews() {
@@ -176,6 +187,10 @@ async function scrapeReviews() {
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--no-first-run',
+            // Single-process cuts memory use by ~40% (no separate renderer process).
+            // We compensate for broken programmatic scroll by using mouse.wheel().
+            '--no-zygote',
+            '--single-process',
             '--disable-extensions',
             '--disable-background-networking',
             '--mute-audio',
