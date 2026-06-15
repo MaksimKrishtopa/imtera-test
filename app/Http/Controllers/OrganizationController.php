@@ -21,6 +21,16 @@ class OrganizationController extends Controller
             return response()->json(null);
         }
 
+        // If stuck in processing for > 10 min (e.g. container was restarted
+        // and killed the background parse process), auto-reset to error.
+        if ($org->parse_status === 'processing' && $org->updated_at->diffInMinutes(now()) > 10) {
+            $org->update([
+                'parse_status' => 'error',
+                'parse_error'  => 'Парсинг прерван (перезапуск сервера). Попробуйте ещё раз.',
+            ]);
+            $org->refresh();
+        }
+
         return response()->json($this->formatOrganization($org));
     }
 
