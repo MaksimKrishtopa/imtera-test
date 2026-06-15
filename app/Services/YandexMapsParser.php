@@ -123,9 +123,12 @@ class YandexMapsParser
         $decoded = urldecode($originalUrl);
 
         // Extract slug + id if present: /org/{slug}/{id}
-        if (preg_match('#/org/([^/]+/\d{7,20})#', $decoded, $m)) {
-            $base = preg_replace('#/org/[^?#]+#', '/org/' . $m[1], $decoded);
-            $base = rtrim(preg_replace('#[?#].*$#', '', $base), '/');
+        if (preg_match('|/org/([^/]+/\d{7,20})|', $decoded, $m)) {
+            // Strip query string and fragment, replace org path
+            $withoutQuery = strtok($decoded, '?');
+            $withoutQuery = strtok($withoutQuery, '#');
+            // Replace everything after /org/ with slug/id
+            $base = rtrim(preg_replace('|/org/.*|', '/org/' . $m[1], $withoutQuery), '/');
             return $base . '/reviews/';
         }
 
