@@ -32,3 +32,6 @@ cmds = [
     "php artisan route:cache",
     "php artisan view:cache"
 ]
+
+[start]
+cmd = "if [ \"$SERVICE_ROLE\" = \"worker\" ]; then php artisan queue:work --timeout=360 --tries=1 --sleep=3; else php artisan migrate --force && php artisan db:seed --force && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT; fi"
