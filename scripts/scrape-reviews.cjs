@@ -5,8 +5,8 @@ const { chromium } = require('playwright');
 const REVIEWS_URL        = process.argv[2];
 const MAX_REVIEWS        = parseInt(process.argv[3] || '570', 10);
 const BATCH_SIZE         = 50;
-const SCROLL_PAUSE_MS    = 2000;
-const MAX_NO_NEW_RETRIES = 5;
+const SCROLL_PAUSE_MS    = 2500;
+const MAX_NO_NEW_RETRIES = 6;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
 
