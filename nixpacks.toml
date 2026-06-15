@@ -34,4 +34,4 @@ cmds = [
 ]
 
 [start]
-cmd = "chmod +x /app/start.sh && /app/start.sh"
+cmd = "chmod +x /app/start.sh && /app/start.sh 2>&1"
