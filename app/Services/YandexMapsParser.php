@@ -12,9 +12,10 @@ class YandexMapsParser
 
     /**
      * Extract Yandex organization ID from a Maps URL.
-     * Supports formats like:
-     * - https://yandex.ru/maps/org/name/1234567890/
-     * - https://yandex.com/maps/org/1234567890/
+     * Supports all known URL formats:
+     * - https://yandex.ru/maps/org/name/1234567890/reviews/
+     * - https://yandex.ru/maps/org/1234567890/
+     * - https://yandex.ru/maps/213/city/?poi[uri]=ymapsbm1://org?oid=1234567890
      * - https://yandex.ru/maps/?oid=1234567890
      */
     public function extractOrgId(string $url): string
@@ -23,18 +24,21 @@ class YandexMapsParser
             throw new \InvalidArgumentException('Ссылка должна вести на Яндекс.Карты (yandex.ru или yandex.com).');
         }
 
-        // Pattern: /maps/org/{name}/{id}/ or /maps/{city}/{id}/
-        if (preg_match('#/org/[^/]*/(\d{7,20})#', $url, $m)) {
+        // Decode any percent-encoding so all formats are handled uniformly
+        $decoded = urldecode($url);
+
+        // Format: poi[uri]=ymapsbm1://org?oid=1234567890  (map POI links with encoded URI)
+        if (preg_match('/oid=(\d{7,20})/', $decoded, $m)) {
             return $m[1];
         }
 
-        // Pattern: /org/{id}/ (no slug)
-        if (preg_match('#/org/(\d{7,20})#', $url, $m)) {
+        // Format: /org/{slug}/{id}/ or /org/{id}/
+        if (preg_match('#/org/(?:[^/]+/)?(\d{7,20})#', $decoded, $m)) {
             return $m[1];
         }
 
-        // Pattern: ?oid= query param
-        $parsed = parse_url($url);
+        // Format: ?oid= query param (direct URL)
+        $parsed = parse_url($decoded);
         if (!empty($parsed['query'])) {
             parse_str($parsed['query'], $query);
             if (!empty($query['oid']) && is_numeric($query['oid'])) {
@@ -44,7 +48,7 @@ class YandexMapsParser
 
         throw new \InvalidArgumentException(
             'Не удалось извлечь ID организации из URL. ' .
-            'URL должен быть в формате: https://yandex.ru/maps/org/название/ID/'
+            'Поддерживаемые форматы: /maps/org/название/ID/ или ссылки из меню «Поделиться» в Яндекс.Картах.'
         );
     }
 
