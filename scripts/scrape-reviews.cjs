@@ -23,8 +23,8 @@ const MAX_REVIEWS = parseInt(process.argv[3] || '600', 10);
 
 // Tuned for Railway free-tier (~512 MB RAM):
 // shorter pause = faster, but too short misses lazy-loaded reviews
-const SCROLL_PAUSE_MS    = 1800;
-const MAX_NO_NEW_RETRIES = 4;
+const SCROLL_PAUSE_MS    = 2200;
+const MAX_NO_NEW_RETRIES = 5;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
 
@@ -191,9 +191,7 @@ async function scrapeReviews() {
             // Critical in Docker/Railway: Chrome uses /tmp instead of /dev/shm
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            // Run in a single process — reduces memory significantly (~40%)
             '--no-zygote',
-            '--single-process',
             // Cut unnecessary background work
             '--disable-extensions',
             '--disable-background-networking',
