@@ -213,13 +213,15 @@ async function scrapeReviews() {
 
     const page = await context.newPage();
 
-    // Block heavy resources — saves ~60% of load time and significant RAM
+    // Block heavy resources — saves load time and RAM.
+    // NOTE: CSS is intentionally NOT blocked — it's needed for the scroll
+    // container to have correct dimensions (scroll height calculations).
     await page.route('**', (route) => {
         const type = route.request().resourceType();
         if (['image', 'font', 'media', 'websocket'].includes(type)) {
             return route.abort();
         }
-        // Block Yandex ad/metric domains
+        // Block Yandex ad / metrics
         const url = route.request().url();
         if (/mc\.yandex|metrika|counter|ads\.yandex|adfox/.test(url)) {
             return route.abort();

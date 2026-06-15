@@ -77,9 +77,9 @@ class YandexMapsParser
                 ]);
             }
 
-            // Delete old reviews and save new batch
-            $organization->reviews()->delete();
+            // Save reviews (replace old with new atomically)
             $reviews = $result['reviews'] ?? [];
+            $organization->reviews()->delete();
 
             foreach ($reviews as $reviewData) {
                 $this->createReview($organization->id, $reviewData);
@@ -144,7 +144,7 @@ class YandexMapsParser
 
         Log::info('Running node scraper', ['orgId' => $orgId, 'outFile' => $outFile]);
 
-        $timeout = 300;
+        $timeout = 450;
         $start = time();
 
         $process = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null);
