@@ -34,4 +34,4 @@ cmds = [
 ]
 
 [start]
-cmd = "if [ \"$SERVICE_ROLE\" = \"worker\" ]; then php artisan queue:work --timeout=360 --tries=1 --sleep=3; else php artisan migrate --force && php artisan db:seed --force && php artisan config:clear && php artisan serve --host=0.0.0.0 --port=$PORT; fi"
+cmd = "chmod +x /app/start.sh && /app/start.sh"
