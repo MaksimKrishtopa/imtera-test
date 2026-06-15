@@ -23,7 +23,7 @@ const MAX_REVIEWS = parseInt(process.argv[3] || '600', 10);
 
 // Tuned for Railway free-tier (~512 MB RAM):
 // shorter pause = faster, but too short misses lazy-loaded reviews
-const SCROLL_PAUSE_MS    = 2200;
+const SCROLL_PAUSE_MS    = 2000;
 const MAX_NO_NEW_RETRIES = 5;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
@@ -167,17 +167,22 @@ async function extractOrgInfo(page) {
 
 async function scrollReviewsList(page) {
     await page.evaluate(() => {
-        // Try to find the reviews scroll container, fall back to window scroll
-        const container = (
-            document.querySelector('.scroll__container') ||
-            document.querySelector('[class*="business-reviews-card-view__reviews-container"]') ||
-            document.querySelector('.sidebar-panel__content') ||
-            document.querySelector('[class*="panel__content"]')
-        );
-        if (container && container.scrollHeight > container.clientHeight + 50) {
-            container.scrollTop += 3500;
+        // Scroll last visible review into view — most reliable trigger for lazy loading.
+        // This works regardless of which element is the scroll container.
+        const reviews = document.querySelectorAll('[class*="business-review-view"][itemprop="review"]');
+        if (reviews.length > 0) {
+            reviews[reviews.length - 1].scrollIntoView({ behavior: 'instant', block: 'end' });
         } else {
-            window.scrollBy(0, 3500);
+            // Fallback: scroll the sidebar / panel container
+            const container = (
+                document.querySelector('.scroll__container') ||
+                document.querySelector('[class*="panel__content"]')
+            );
+            if (container) {
+                container.scrollTop = container.scrollHeight;
+            } else {
+                window.scrollBy(0, 5000);
+            }
         }
     });
 }
@@ -191,7 +196,9 @@ async function scrapeReviews() {
             // Critical in Docker/Railway: Chrome uses /tmp instead of /dev/shm
             '--disable-dev-shm-usage',
             '--disable-gpu',
+            // Reduce memory by ~40%: one process instead of browser + renderer
             '--no-zygote',
+            '--single-process',
             // Cut unnecessary background work
             '--disable-extensions',
             '--disable-background-networking',

@@ -2,23 +2,9 @@
 
 Веб-приложение для парсинга отзывов и рейтинга организаций из Яндекс.Карт.
 
-🌐 **Демо:** https://web-production-48ec5.up.railway.app  
+🌐 **Сайт:** https://web-production-48ec5.up.railway.app  
 📦 **Репозиторий:** https://github.com/MaksimKrishtopa/imtera-test  
-**Логин:** `admin@imtera.test` / `password`
-
----
-
-## Стек
-
-| Слой | Технологии |
-|---|---|
-| Backend | Laravel 11, PHP 8.3, Laravel Sanctum |
-| Frontend | Vue 3 (Composition API), Pinia, Axios, Vite |
-| БД | SQLite (локально), PostgreSQL (Railway) |
-| Парсинг | Node.js + Playwright (headless Chromium) |
-| Хостинг | Railway (free tier) |
-
----
+**Логин и пароль:** `admin@imtera.test` / `password`
 
 ## Локальный запуск
 
@@ -86,41 +72,6 @@ services:
 | `DATABASE_URL` | PostgreSQL URL (Railway авто) | `postgresql://...` |
 | `SANCTUM_STATEFUL_DOMAINS` | Домены для SPA-авторизации | `yourdomain.com` |
 | `ASSET_URL` | HTTPS URL для ассетов | `https://...` |
-
----
-
-## Подход к парсингу
-
-### Проблема
-
-Яндекс.Карты не предоставляют публичного API. Прямые HTTP-запросы блокируются:
-- CSRF-защита (все запросы возвращают `{"csrfToken":"..."}`)
-- Bot-детекция по заголовкам и поведению
-- Динамическая подгрузка отзывов при скролле (lazy loading)
-
-### Решение — Playwright (headless Chromium)
-
-Парсер (`scripts/scrape-reviews.cjs`) запускает **настоящий браузер** (Chromium) без интерфейса и симулирует поведение пользователя:
-
-1. **Навигация** — открывает страницу отзывов организации
-2. **Извлечение метаданных** — ищет `aggregateRating` в Schema.org microdata (`<meta itemprop="...">`)
-3. **Прокрутка** — повторяет скролл вниз с паузами, пока новые отзывы перестают подгружаться
-4. **Извлечение отзывов** — парсит DOM-элементы `.business-review-view`, извлекает автора, рейтинг, дату, текст
-5. **Дедупликация** — убирает дубли по ID отзыва
-
-### Асинхронность
-
-Парсинг занимает 3–8 минут. Чтобы HTTP-запрос не висел:
-- `POST /api/organization/parse` немедленно возвращает `202 Accepted`
-- Через `exec()` в фоне запускается `php artisan app:parse-org {id}`
-- Фронтенд **поллит** `GET /api/organization` каждые 5 секунд, пока `parse_status !== 'done'`
-
-### Ограничения и возможные улучшения
-
-- Яндекс периодически меняет DOM-структуру → нужно мониторить CSS-классы
-- Playwright использует ~500 MB RAM → на free-tier Railway может упасть при нагрузке
-- Playwright устанавливается при каждом деплое (~8 мин), что медленно
-- Для высокой нагрузки: вынести парсинг в отдельный микросервис с Redis-очередью
 
 ---
 
