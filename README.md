@@ -1,153 +1,155 @@
-# Яндекс.Карты — Сбор отзывов
+# Yandex Maps Reviews — Laravel + Vue 3
 
-Приложение для сбора и отображения отзывов с карточки организации в Яндекс.Картах.
+Веб-приложение для парсинга отзывов и рейтинга организаций из Яндекс.Карт.
 
-
-## Быстрый старт (Docker Compose)
-
-```bash
-git clone <repo-url> && cd imtera-test
-cp .env.example .env
-# Отредактируйте .env: APP_KEY, DB_* переменные
-docker compose up --build -d
-```
-
-После запуска:
-- **Frontend:** http://localhost:8080
-- **API:** http://localhost:8080/api
-- **Логин:** `admin@imtera.test` / `password`
-
-> **Примечание:** Docker Compose файл для самостоятельной настройки (см. ниже пример).
+🌐 **Демо:** https://web-production-48ec5.up.railway.app  
+📦 **Репозиторий:** https://github.com/MaksimKrishtopa/imtera-test  
+**Логин:** `admin@imtera.test` / `password`
 
 ---
 
-## Локальный запуск без Docker
+## Стек
+
+| Слой | Технологии |
+|---|---|
+| Backend | Laravel 11, PHP 8.3, Laravel Sanctum |
+| Frontend | Vue 3 (Composition API), Pinia, Axios, Vite |
+| БД | SQLite (локально), PostgreSQL (Railway) |
+| Парсинг | Node.js + Playwright (headless Chromium) |
+| Хостинг | Railway (free tier) |
+
+---
+
+## Локальный запуск
 
 ### Требования
-- PHP 8.3+ с расширениями: `pdo_sqlite`, `tokenizer`, `mbstring`, `xml`, `ctype`, `json`, `curl`
-- Node.js 18+ и npm
-- Composer
+- PHP 8.3+, Composer
+- Node.js 22+, npm
+- SQLite (встроен в PHP)
 
 ### Установка
 
 ```bash
-# 1. Зависимости
+git clone https://github.com/MaksimKrishtopa/imtera-test.git
+cd imtera-test
+cp .env.example .env
+```
+
+Отредактируйте `.env`:
+```env
+APP_KEY=       # будет сгенерирован ниже
+DB_CONNECTION=sqlite
+QUEUE_CONNECTION=database
+```
+
+```bash
 composer install
-npm install
-
-# 2. Playwright Chromium
-npx playwright install chromium
-
-# 3. Окружение
-cp .env.example .env.local
-# Установите: APP_KEY (php artisan key:generate), DB_CONNECTION=sqlite
-
 php artisan key:generate
-php artisan migrate --seed    # создаёт пользователя admin@imtera.test / password
+php artisan migrate
+php artisan db:seed
 
-# 4. Сборка фронтенда
+npm install
 npm run build
+php artisan serve
+```
 
-# 5. Запуск
-php artisan serve &           # порт 8000
-php artisan queue:work --timeout=360 --tries=1  # обработчик задач
+Откройте http://localhost:8000
+
+### Docker Compose (опционально)
+
+```yaml
+version: "3.8"
+services:
+  app:
+    image: php:8.3-cli
+    working_dir: /app
+    volumes: [.:/app]
+    ports: ["8000:8000"]
+    command: >
+      sh -c "composer install && npm ci && npm run build &&
+             php artisan migrate && php artisan db:seed &&
+             php artisan serve --host=0.0.0.0"
+    environment:
+      - DB_CONNECTION=sqlite
+      - QUEUE_CONNECTION=database
 ```
 
 ---
 
 ## Переменные окружения
 
-| Переменная | Описание | По умолчанию |
+| Переменная | Описание | Пример |
 |---|---|---|
-| `APP_KEY` | Ключ шифрования Laravel | — |
-| `APP_URL` | Базовый URL приложения | `http://localhost:8000` |
-| `DB_CONNECTION` | Тип БД: `sqlite` или `mysql`/`pgsql` | `sqlite` |
-| `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` | Параметры MySQL/PostgreSQL | — |
-| `QUEUE_CONNECTION` | Драйвер очереди: `database` | `database` |
-| `SESSION_DRIVER` | Хранилище сессий | `database` |
+| `APP_KEY` | Laravel application key | `base64:...` |
+| `APP_URL` | URL приложения | `https://...` |
+| `DB_CONNECTION` | Драйвер БД | `pgsql` / `sqlite` |
+| `DATABASE_URL` | PostgreSQL URL (Railway авто) | `postgresql://...` |
+| `SANCTUM_STATEFUL_DOMAINS` | Домены для SPA-авторизации | `yourdomain.com` |
+| `ASSET_URL` | HTTPS URL для ассетов | `https://...` |
 
 ---
 
-## Docker Compose
+## Подход к парсингу
 
-```yaml
-version: '3.9'
-services:
-  app:
-    build: .
-    ports: ["8080:8000"]
-    environment:
-      APP_KEY: ${APP_KEY}
-      DB_CONNECTION: pgsql
-      DB_HOST: db
-      DB_DATABASE: imtera
-      DB_USERNAME: imtera
-      DB_PASSWORD: secret
-      QUEUE_CONNECTION: database
-    depends_on: [db]
+### Проблема
 
-  worker:
-    build: .
-    command: php artisan queue:work --timeout=360 --tries=1
-    environment: *app_env
-    depends_on: [db]
+Яндекс.Карты не предоставляют публичного API. Прямые HTTP-запросы блокируются:
+- CSRF-защита (все запросы возвращают `{"csrfToken":"..."}`)
+- Bot-детекция по заголовкам и поведению
+- Динамическая подгрузка отзывов при скролле (lazy loading)
 
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: imtera
-      POSTGRES_USER: imtera
-      POSTGRES_PASSWORD: secret
-    volumes: [pgdata:/var/lib/postgresql/data]
+### Решение — Playwright (headless Chromium)
 
-volumes:
-  pgdata:
-```
+Парсер (`scripts/scrape-reviews.cjs`) запускает **настоящий браузер** (Chromium) без интерфейса и симулирует поведение пользователя:
 
+1. **Навигация** — открывает страницу отзывов организации
+2. **Извлечение метаданных** — ищет `aggregateRating` в Schema.org microdata (`<meta itemprop="...">`)
+3. **Прокрутка** — повторяет скролл вниз с паузами, пока новые отзывы перестают подгружаться
+4. **Извлечение отзывов** — парсит DOM-элементы `.business-review-view`, извлекает автора, рейтинг, дату, текст
+5. **Дедупликация** — убирает дубли по ID отзыва
 
-### Архитектура парсинга
+### Асинхронность
 
-```
-OrganizationController
-    └── ParseOrganizationJob (Queue)
-            └── YandexMapsParser::parse()
-                    └── runNodeScraper() → proc_open → node scrape-reviews.cjs
-                                                            │
-                                                            ├── Playwright Chromium
-                                                            ├── Навигация на /reviews/
-                                                            ├── Schema.org aggregateRating → рейтинг, счётчики
-                                                            ├── [itemprop="review"] → отзывы из DOM
-                                                            └── Скроллинг контейнера → +50 отзывов каждые 2.5с
-```
+Парсинг занимает 3–8 минут. Чтобы HTTP-запрос не висел:
+- `POST /api/organization/parse` немедленно возвращает `202 Accepted`
+- Через `exec()` в фоне запускается `php artisan app:parse-org {id}`
+- Фронтенд **поллит** `GET /api/organization` каждые 5 секунд, пока `parse_status !== 'done'`
 
+### Ограничения и возможные улучшения
+
+- Яндекс периодически меняет DOM-структуру → нужно мониторить CSS-классы
+- Playwright использует ~500 MB RAM → на free-tier Railway может упасть при нагрузке
+- Playwright устанавливается при каждом деплое (~8 мин), что медленно
+- Для высокой нагрузки: вынести парсинг в отдельный микросервис с Redis-очередью
 
 ---
 
 ## Структура БД
 
 ```sql
-users           -- id, name, email, password
-organizations   -- id, user_id, url, yandex_id, name, rating,
-                --   reviews_count, ratings_count,
-                --   parse_status (pending|processing|done|error),
-                --   parse_error, parsed_at
-reviews         -- id, organization_id, author_name, author_avatar,
-                --   rating, text, reviewed_at, yandex_review_id
-jobs            -- Laravel queue jobs table
+-- Организации (по одной на пользователя)
+organizations:
+  id, user_id, url, yandex_id, name,
+  rating, reviews_count, ratings_count,
+  parse_status (pending|processing|done|error),
+  parse_error, parsed_at, created_at, updated_at
+
+-- Отзывы
+reviews:
+  id, organization_id, yandex_review_id,
+  author, rating (1-5), text, date (YYYY-MM-DD),
+  created_at, updated_at
 ```
 
+---
 
-
-## API Endpoints
+## API-эндпоинты
 
 | Метод | URL | Описание |
 |---|---|---|
-| POST | `/api/auth/login` | Авторизация (email + password) |
-| POST | `/api/auth/logout` | Выход |
-| GET | `/api/auth/me` | Текущий пользователь |
-| GET | `/api/organization` | Данные организации |
-| POST | `/api/organization` | Сохранить URL организации |
-| POST | `/api/organization/parse` | Запустить парсинг (async, 202) |
-| GET | `/api/reviews?page=N` | Отзывы, 50 на страницу |
-
-
+| `POST` | `/api/auth/login` | Авторизация |
+| `POST` | `/api/auth/logout` | Выход |
+| `GET` | `/api/organization` | Текущая организация |
+| `POST` | `/api/organization` | Сохранить URL |
+| `POST` | `/api/organization/parse` | Запустить парсинг (202 async) |
+| `GET` | `/api/reviews?page=N` | Отзывы (50 на страницу) |
