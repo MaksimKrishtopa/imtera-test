@@ -19,7 +19,9 @@
 
 const { chromium } = require('playwright');
 
-const ORG_ID      = process.argv[2];
+// Accepts a full reviews URL (e.g. .../org/name/id/reviews/) — NOT just an orgId.
+// This avoids Yandex's redirect from numeric-only URLs which closes the page context.
+const REVIEWS_URL = process.argv[2];
 const MAX_REVIEWS = parseInt(process.argv[3] || '600', 10);
 
 const SCROLL_PAUSE_MS    = 2500;
@@ -27,10 +29,14 @@ const MAX_NO_NEW_RETRIES = 6;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
 
-if (!ORG_ID) {
-    process.stderr.write(JSON.stringify({ error: 'Org ID is required' }) + '\n');
+if (!REVIEWS_URL) {
+    process.stderr.write(JSON.stringify({ error: 'Reviews URL is required' }) + '\n');
     process.exit(1);
 }
+
+// Extract orgId from URL for the output (informational only)
+const ORG_ID_MATCH = REVIEWS_URL.match(/\/org\/(?:[^/]+\/)?(\d{7,20})/);
+const ORG_ID = ORG_ID_MATCH ? ORG_ID_MATCH[1] : 'unknown';
 
 function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
@@ -224,7 +230,9 @@ async function scrapeReviews() {
     try {
         // 'domcontentloaded' is key: 'networkidle' never fires on Yandex Maps
         // because the page continuously polls the network, causing an OOM crash.
-        await page.goto(`https://yandex.ru/maps/org/${ORG_ID}/reviews/`, {
+        // We use the full URL (with slug) to avoid Yandex's redirect that would
+        // close the page context and crash with "Target page has been closed".
+        await page.goto(REVIEWS_URL, {
             waitUntil: 'domcontentloaded',
             timeout: PAGE_LOAD_TIMEOUT,
         });

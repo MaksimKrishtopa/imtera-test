@@ -64,7 +64,12 @@ class YandexMapsParser
             $orgId = $this->extractOrgId($organization->url);
             $organization->update(['yandex_id' => $orgId]);
 
-            $result = $this->runNodeScraper($orgId, self::MAX_REVIEWS);
+            // Build a canonical reviews URL preserving the slug (if present).
+            // Navigating to org/{id}/reviews/ without slug causes Yandex to
+            // redirect, which closes the Playwright page context and crashes.
+            $reviewsUrl = $this->buildReviewsUrl($organization->url, $orgId);
+
+            $result = $this->runNodeScraper($reviewsUrl, self::MAX_REVIEWS);
 
             // Save org info
             $orgInfo = $result['org_info'] ?? [];
@@ -109,10 +114,30 @@ class YandexMapsParser
     }
 
     /**
-     * Run the Node.js Playwright scraper script.
-     * Uses a temp file for output to avoid proc_open stream issues on Windows.
+     * Build the canonical Yandex Maps reviews URL preserving the org slug.
+     * Passing a numeric-only URL (org/{id}/reviews/) causes Yandex to redirect,
+     * which closes the Playwright page context and crashes the scraper.
      */
-    private function runNodeScraper(string $orgId, int $maxReviews): array
+    private function buildReviewsUrl(string $originalUrl, string $orgId): string
+    {
+        $decoded = urldecode($originalUrl);
+
+        // Extract slug + id if present: /org/{slug}/{id}
+        if (preg_match('#/org/([^/]+/\d{7,20})#', $decoded, $m)) {
+            $base = preg_replace('#/org/[^?#]+#', '/org/' . $m[1], $decoded);
+            $base = rtrim(preg_replace('#[?#].*$#', '', $base), '/');
+            return $base . '/reviews/';
+        }
+
+        // Fallback: numeric-only (will redirect but that's unavoidable)
+        return "https://yandex.ru/maps/org/{$orgId}/reviews/";
+    }
+
+    /**
+     * Run the Node.js Playwright scraper script.
+     * Accepts the full reviews URL (not just orgId) to avoid Yandex redirects.
+     */
+    private function runNodeScraper(string $reviewsUrl, int $maxReviews): array
     {
         $scriptPath = str_replace('/', DIRECTORY_SEPARATOR, base_path('scripts/scrape-reviews.cjs'));
 
@@ -120,7 +145,9 @@ class YandexMapsParser
             throw new \RuntimeException('Скрипт парсера не найден: ' . $scriptPath);
         }
 
-        $outFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'yandex_scraper_' . $orgId . '_' . getmypid() . '.json';
+        // Use URL as part of temp filename (sanitized)
+        $safeId = preg_replace('/[^a-z0-9]/', '_', parse_url($reviewsUrl, PHP_URL_PATH) ?? 'org');
+        $outFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'yandex_scraper_' . substr($safeId, -30) . '_' . getmypid() . '.json';
 
         // Build command with output redirected to temp file
         $isWindows = PHP_OS_FAMILY === 'Windows';
@@ -128,7 +155,7 @@ class YandexMapsParser
             $cmd = sprintf(
                 'cmd /c node %s %s %s > %s 2>&1',
                 escapeshellarg($scriptPath),
-                escapeshellarg($orgId),
+                escapeshellarg($reviewsUrl),
                 escapeshellarg((string) $maxReviews),
                 escapeshellarg($outFile)
             );
@@ -136,7 +163,7 @@ class YandexMapsParser
             $cmd = sprintf(
                 'node %s %s %s > %s 2>&1',
                 escapeshellarg($scriptPath),
-                escapeshellarg($orgId),
+                escapeshellarg($reviewsUrl),
                 escapeshellarg((string) $maxReviews),
                 escapeshellarg($outFile)
             );
