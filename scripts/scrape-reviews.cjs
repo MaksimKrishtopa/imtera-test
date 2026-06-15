@@ -4,10 +4,11 @@
  *
  * Strategy:
  *  1. Load the org reviews page with a real browser (bypasses bot protection)
- *  2. Block heavy resources (images, fonts, CSS) to cut memory & load time
- *  3. Use 'domcontentloaded' — NOT 'networkidle' (networkidle causes crashes
- *     because Yandex pages continuously poll the network)
- *  4. Scroll the reviews container to lazy-load all reviews
+ *  2. Block heavy resources (images, fonts, ad-metrics) to save RAM & load time
+ *  3. Use 'domcontentloaded' — NOT 'networkidle'.
+ *     Reason: Yandex Maps continuously polls the network so 'networkidle' never
+ *     (or very late) resolves, keeping the browser alive until an OOM crash.
+ *  4. Scroll the reviews sidebar to lazy-load all available reviews
  *  5. Extract review data from Schema.org microdata + DOM attributes
  *
  * Usage: node scrape-reviews.cjs <orgId> [maxReviews]
@@ -21,10 +22,8 @@ const { chromium } = require('playwright');
 const ORG_ID      = process.argv[2];
 const MAX_REVIEWS = parseInt(process.argv[3] || '600', 10);
 
-// Tuned for Railway free-tier (~512 MB RAM):
-// shorter pause = faster, but too short misses lazy-loaded reviews
 const SCROLL_PAUSE_MS    = 2500;
-const MAX_NO_NEW_RETRIES = 5;
+const MAX_NO_NEW_RETRIES = 6;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
 
@@ -45,7 +44,6 @@ const MONTHS_RU = {
 
 function parseRussianDate(str) {
     if (!str) return null;
-    // ISO or datetime attribute
     if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
         const d = new Date(str);
         return isNaN(d.getTime()) ? null : d.toISOString();
@@ -65,15 +63,12 @@ async function extractReviewsFromDOM(page) {
         const els = document.querySelectorAll('[class*="business-review-view"][itemprop="review"]');
         const out = [];
         for (const el of els) {
-            // Author
             const authorEl = el.querySelector(
                 '[itemprop="author"] [itemprop="name"], ' +
-                '.business-review-view__author-name [itemprop="name"], ' +
-                '[class*="user-icon-view__name"]'
+                '.business-review-view__author-name [itemprop="name"]'
             );
             const author = authorEl?.textContent?.trim() || 'Аноним';
 
-            // Avatar
             const avatarEl = el.querySelector('[class*="user-icon-view__icon"]');
             let avatar = null;
             if (avatarEl) {
@@ -81,18 +76,16 @@ async function extractReviewsFromDOM(page) {
                 avatar = m ? m[1] : null;
             }
 
-            // Rating (stars aria-label)
             let rating = null;
             const starsEl = el.querySelector('[class*="business-rating-badge-view__stars"]');
             if (starsEl) {
                 const lbl = starsEl.getAttribute('aria-label') || '';
-                const m = lbl.match(/(\d(?:[.,]\d)?)\s*(?:из|Из|of)/i) ||
+                const m = lbl.match(/(\d(?:[.,]\d)?)\s*(?:из|Из)/i) ||
                           lbl.match(/(?:Оценка|Rating)\s*(\d(?:[.,]\d)?)/i) ||
                           lbl.match(/^(\d(?:[.,]\d)?)/);
                 if (m) rating = Math.round(parseFloat(m[1].replace(',', '.')));
             }
 
-            // Review text (expand "Ещё" links are already expanded after scrolling)
             let text = null;
             const textEl = el.querySelector(
                 '[class*="review-view__body-full"], ' +
@@ -105,20 +98,17 @@ async function extractReviewsFromDOM(page) {
                     .replace(/\s*(?:Ещё|ещё|Развернуть|Свернуть|свернуть)\s*$/, '').trim() || null;
             }
 
-            // Date
             const dateEl = el.querySelector(
-                '[class*="review-view__date"], ' +
-                '.business-review-view__date, ' +
-                'time[datetime]'
+                '[class*="review-view__date"], .business-review-view__date, time[datetime]'
             );
             const dateRaw = dateEl?.getAttribute('datetime') || dateEl?.textContent?.trim() || null;
 
             out.push({
-                author_name: author,
-                author_avatar: avatar,
+                author_name:      author,
+                author_avatar:    avatar,
                 rating,
                 text,
-                reviewed_at_raw: dateRaw,
+                reviewed_at_raw:  dateRaw,
                 yandex_review_id: el.getAttribute('data-review-id') || null,
             });
         }
@@ -128,8 +118,7 @@ async function extractReviewsFromDOM(page) {
 
 async function extractOrgInfo(page) {
     return page.evaluate(() => {
-        // Schema.org aggregateRating
-        const agg  = document.querySelector('[itemprop="aggregateRating"]');
+        const agg = document.querySelector('[itemprop="aggregateRating"]');
         let rating = null, reviewsCount = null;
         if (agg) {
             const rv = agg.querySelector('[itemprop="ratingValue"]');
@@ -141,20 +130,16 @@ async function extractOrgInfo(page) {
             if (rc) reviewsCount = parseInt(rc.getAttribute('content') || rc.textContent || '0') || null;
         }
 
-        // Organisation name
         const nameEl = document.querySelector(
             '[itemtype*="schema.org"] [itemprop="name"], ' +
-            '[class*="orgpage-header-view__title"], ' +
-            'h1[class*="orgpage"]'
+            '[class*="orgpage-header-view__title"], h1[class*="orgpage"]'
         );
         const name = nameEl?.getAttribute('content') || nameEl?.textContent?.trim() || null;
 
-        // Total ratings count (оценок) — usually a bigger number next to stars
         let ratingsCount = null;
         const ratingAmountEl = document.querySelector(
             '.business-summary-rating-badge-view__rating-count, ' +
-            '.business-rating-amount-view, ' +
-            '[class*="rating-amount"]'
+            '.business-rating-amount-view, [class*="rating-amount"]'
         );
         if (ratingAmountEl) {
             const m = (ratingAmountEl.textContent || '').match(/(\d[\d\s]+)/);
@@ -167,24 +152,16 @@ async function extractOrgInfo(page) {
 
 async function scrollReviewsList(page) {
     await page.evaluate(() => {
-        // Find the scrollable reviews container and push it down.
-        // We try multiple selectors because Yandex changes class names.
         const container = (
             document.querySelector('.scroll__container') ||
             document.querySelector('[class*="business-reviews-card-view__reviews-container"]') ||
             document.querySelector('.sidebar-panel__content') ||
             document.querySelector('[class*="panel__content"]')
         );
-
         if (container && container.scrollHeight > container.clientHeight + 50) {
             container.scrollTop += 3000;
         } else {
-            // Fallback: scroll window + scroll last review into view
             window.scrollBy(0, 3000);
-            const reviews = document.querySelectorAll('[itemprop="review"]');
-            if (reviews.length > 0) {
-                reviews[reviews.length - 1].scrollIntoView({ behavior: 'instant', block: 'end' });
-            }
         }
     });
 }
@@ -195,20 +172,13 @@ async function scrapeReviews() {
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            // Critical in Docker/Railway: Chrome uses /tmp instead of /dev/shm
+            // Critical in Docker / Railway: write to /tmp, not the limited /dev/shm
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            // Reduce memory by ~40%: one process instead of browser + renderer
-            '--no-zygote',
-            '--single-process',
-            // Cut unnecessary background work
+            '--no-first-run',
             '--disable-extensions',
             '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--disable-translate',
             '--mute-audio',
-            '--no-first-run',
             '--safebrowsing-disable-auto-update',
         ],
     });
@@ -222,15 +192,13 @@ async function scrapeReviews() {
 
     const page = await context.newPage();
 
-    // Block heavy resources — saves load time and RAM.
-    // NOTE: CSS is intentionally NOT blocked — it's needed for the scroll
-    // container to have correct dimensions (scroll height calculations).
+    // Block heavy resources: images, fonts, media, Yandex ad/metrics.
+    // CSS is intentionally NOT blocked — needed for scroll container dimensions.
     await page.route('**', (route) => {
         const type = route.request().resourceType();
         if (['image', 'font', 'media', 'websocket'].includes(type)) {
             return route.abort();
         }
-        // Block Yandex ad / metrics
         const url = route.request().url();
         if (/mc\.yandex|metrika|counter|ads\.yandex|adfox/.test(url)) {
             return route.abort();
@@ -239,22 +207,16 @@ async function scrapeReviews() {
     });
 
     try {
-        const reviewsUrl = `https://yandex.ru/maps/org/${ORG_ID}/reviews/`;
-
-        // Use 'domcontentloaded' — NOT 'networkidle':
-        // Yandex Maps continuously polls the network so networkidle never
-        // (or very late) resolves, keeping the browser alive until OOM crash.
-        await page.goto(reviewsUrl, {
+        // 'domcontentloaded' is key: 'networkidle' never fires on Yandex Maps
+        // because the page continuously polls the network, causing an OOM crash.
+        await page.goto(`https://yandex.ru/maps/org/${ORG_ID}/reviews/`, {
             waitUntil: 'domcontentloaded',
             timeout: PAGE_LOAD_TIMEOUT,
         });
 
-        // Wait for at least one review to appear in the DOM
         await page.waitForSelector('[class*="business-review-view"][itemprop="review"]', {
             timeout: ELEMENT_TIMEOUT,
         });
-
-        // Brief pause for the first batch to fully render
         await sleep(1500);
 
         const orgInfo = await extractOrgInfo(page);
