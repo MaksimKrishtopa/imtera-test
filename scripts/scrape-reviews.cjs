@@ -1,42 +1,19 @@
-#!/usr/bin/env node
-/**
- * Yandex Maps Reviews Scraper — Playwright headless Chromium
- *
- * Strategy:
- *  1. Load the org reviews page with a real browser (bypasses bot protection)
- *  2. Block heavy resources (images, fonts, ad-metrics) to save RAM & load time
- *  3. Use 'domcontentloaded' — NOT 'networkidle'.
- *     Reason: Yandex Maps continuously polls the network so 'networkidle' never
- *     (or very late) resolves, keeping the browser alive until an OOM crash.
- *  4. Scroll the reviews sidebar to lazy-load all available reviews
- *  5. Extract review data from Schema.org microdata + DOM attributes
- *
- * Usage: node scrape-reviews.cjs <orgId> [maxReviews]
- * Output: single JSON line to stdout
- */
-
 'use strict';
 
 const { chromium } = require('playwright');
 
-// Accepts a full reviews URL (e.g. .../org/name/id/reviews/) — NOT just an orgId.
-// This avoids Yandex's redirect from numeric-only URLs which closes the page context.
-const REVIEWS_URL = process.argv[2];
-const MAX_REVIEWS = parseInt(process.argv[3] || '600', 10);
-
-const SCROLL_PAUSE_MS    = 2500;
-const MAX_NO_NEW_RETRIES = 6;
+const REVIEWS_URL        = process.argv[2];
+const MAX_REVIEWS        = parseInt(process.argv[3] || '570', 10);
+const BATCH_SIZE         = 50;
+const SCROLL_PAUSE_MS    = 2000;
+const MAX_NO_NEW_RETRIES = 5;
 const PAGE_LOAD_TIMEOUT  = 45000;
 const ELEMENT_TIMEOUT    = 20000;
 
 if (!REVIEWS_URL) {
-    process.stderr.write(JSON.stringify({ error: 'Reviews URL is required' }) + '\n');
+    process.stdout.write(JSON.stringify({ error: 'Reviews URL is required' }) + '\n');
     process.exit(1);
 }
-
-// Extract orgId from URL for the output (informational only)
-const ORG_ID_MATCH = REVIEWS_URL.match(/\/org\/(?:[^/]+\/)?(\d{7,20})/);
-const ORG_ID = ORG_ID_MATCH ? ORG_ID_MATCH[1] : 'unknown';
 
 function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
@@ -157,11 +134,6 @@ async function extractOrgInfo(page) {
 }
 
 async function scrollReviewsList(page) {
-    // Use physical mouse wheel events — they reliably trigger Yandex's
-    // IntersectionObserver/scroll handlers even in --single-process mode
-    // (where programmatic scrollTop mutations sometimes don't fire events).
-
-    // First move the mouse over the reviews sidebar so the wheel targets it
     const panelSelector =
         '.scroll__container, ' +
         '[class*="business-reviews-card-view__reviews-container"], ' +
@@ -172,14 +144,9 @@ async function scrollReviewsList(page) {
     if (panel) {
         const box = await panel.boundingBox();
         if (box) {
-            await page.mouse.move(
-                box.x + box.width / 2,
-                box.y + box.height / 2,
-            );
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
         }
     }
-
-    // Dispatch a large wheel scroll
     await page.mouse.wheel(0, 3000);
 }
 
@@ -189,12 +156,9 @@ async function scrapeReviews() {
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            // Critical in Docker / Railway: write to /tmp, not the limited /dev/shm
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--no-first-run',
-            // Single-process cuts memory use by ~40% (no separate renderer process).
-            // We compensate for broken programmatic scroll by using mouse.wheel().
             '--no-zygote',
             '--single-process',
             '--disable-extensions',
@@ -213,8 +177,6 @@ async function scrapeReviews() {
 
     const page = await context.newPage();
 
-    // Block heavy resources: images, fonts, media, Yandex ad/metrics.
-    // CSS is intentionally NOT blocked — needed for scroll container dimensions.
     await page.route('**', (route) => {
         const type = route.request().resourceType();
         if (['image', 'font', 'media', 'websocket'].includes(type)) {
@@ -228,10 +190,6 @@ async function scrapeReviews() {
     });
 
     try {
-        // 'domcontentloaded' is key: 'networkidle' never fires on Yandex Maps
-        // because the page continuously polls the network, causing an OOM crash.
-        // We use the full URL (with slug) to avoid Yandex's redirect that would
-        // close the page context and crash with "Target page has been closed".
         await page.goto(REVIEWS_URL, {
             waitUntil: 'domcontentloaded',
             timeout: PAGE_LOAD_TIMEOUT,
@@ -243,17 +201,18 @@ async function scrapeReviews() {
         await sleep(1500);
 
         const orgInfo = await extractOrgInfo(page);
+        process.stdout.write(JSON.stringify({ type: 'info', org_info: orgInfo }) + '\n');
 
         const reviewMap = new Map();
         let noNewRetries = 0;
         let prevCount    = 0;
+        let emittedCount = 0;
 
         while (reviewMap.size < MAX_REVIEWS && noNewRetries < MAX_NO_NEW_RETRIES) {
             const batch = await extractReviewsFromDOM(page);
 
             for (const r of batch) {
-                const key = r.yandex_review_id ||
-                            `${r.author_name}|${(r.text || '').substring(0, 80)}`;
+                const key = r.yandex_review_id || `${r.author_name}|${(r.text || '').substring(0, 80)}`;
                 if (!reviewMap.has(key)) {
                     reviewMap.set(key, {
                         author_name:      r.author_name,
@@ -264,6 +223,12 @@ async function scrapeReviews() {
                         yandex_review_id: r.yandex_review_id,
                     });
                 }
+            }
+
+            if (reviewMap.size - emittedCount >= BATCH_SIZE) {
+                const newReviews = Array.from(reviewMap.values()).slice(emittedCount, reviewMap.size);
+                process.stdout.write(JSON.stringify({ type: 'batch', reviews: newReviews }) + '\n');
+                emittedCount = reviewMap.size;
             }
 
             if (reviewMap.size === prevCount) {
@@ -279,14 +244,12 @@ async function scrapeReviews() {
             await sleep(SCROLL_PAUSE_MS);
         }
 
-        const reviews = Array.from(reviewMap.values()).slice(0, MAX_REVIEWS);
+        const remaining = Array.from(reviewMap.values()).slice(emittedCount);
+        if (remaining.length > 0) {
+            process.stdout.write(JSON.stringify({ type: 'batch', reviews: remaining }) + '\n');
+        }
 
-        process.stdout.write(JSON.stringify({
-            org_id:         ORG_ID,
-            org_info:       orgInfo,
-            reviews,
-            total_captured: reviews.length,
-        }) + '\n');
+        process.stdout.write(JSON.stringify({ type: 'done', total: reviewMap.size }) + '\n');
 
     } finally {
         await browser.close();
@@ -294,6 +257,6 @@ async function scrapeReviews() {
 }
 
 scrapeReviews().catch(err => {
-    process.stderr.write(JSON.stringify({ error: err.message }) + '\n');
+    process.stdout.write(JSON.stringify({ error: err.message }) + '\n');
     process.exit(1);
 });

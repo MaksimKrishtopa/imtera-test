@@ -370,6 +370,14 @@ input:disabled, .url-input:disabled {
   font-weight: 700;
 }
 
+.loading-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #6b7280;
+}
+
 .reviews-count {
   display: inline-flex;
   align-items: center;

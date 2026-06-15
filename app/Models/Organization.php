@@ -22,10 +22,10 @@ class Organization extends Model
     ];
 
     protected $casts = [
-        'rating' => 'float',
+        'rating'        => 'float',
         'reviews_count' => 'integer',
         'ratings_count' => 'integer',
-        'parsed_at' => 'datetime',
+        'parsed_at'     => 'datetime',
     ];
 
     public function user(): BelongsTo
@@ -36,18 +36,5 @@ class Organization extends Model
     public function reviews(): HasMany
     {
         return $this->hasMany(Review::class)->orderByDesc('reviewed_at');
-    }
-
-    public function isParsed(): bool
-    {
-        return $this->parse_status === 'done' && $this->parsed_at !== null;
-    }
-
-    public function needsRefresh(): bool
-    {
-        if (!$this->isParsed()) {
-            return true;
-        }
-        return $this->parsed_at->diffInHours(now()) >= 6;
     }
 }

@@ -15,23 +15,22 @@ class ReviewController extends Controller
             return response()->json(['message' => 'Организация не настроена.'], 404);
         }
 
-        if ($org->parse_status !== 'done') {
+        if (!in_array($org->parse_status, ['done', 'processing'])) {
             return response()->json(['message' => 'Отзывы ещё не загружены.'], 404);
         }
 
-        $perPage = 50;
         $page = max(1, (int) $request->query('page', 1));
 
         $reviews = $org->reviews()
             ->select(['id', 'author_name', 'author_avatar', 'rating', 'text', 'reviewed_at'])
-            ->paginate($perPage, ['*'], 'page', $page);
+            ->paginate(50, ['*'], 'page', $page);
 
         return response()->json([
-            'data' => $reviews->items(),
-            'total' => $reviews->total(),
-            'per_page' => $reviews->perPage(),
+            'data'         => $reviews->items(),
+            'total'        => $reviews->total(),
+            'per_page'     => $reviews->perPage(),
             'current_page' => $reviews->currentPage(),
-            'last_page' => $reviews->lastPage(),
+            'last_page'    => $reviews->lastPage(),
         ]);
     }
 }

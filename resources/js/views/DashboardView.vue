@@ -17,7 +17,6 @@
     </header>
 
     <main class="main-content">
-      <!-- Settings Section -->
       <section class="settings-card">
         <h2>Настройки организации</h2>
         <p class="section-desc">Вставьте ссылку на карточку вашей организации в Яндекс.Картах</p>
@@ -29,12 +28,12 @@
               type="url"
               placeholder="https://yandex.ru/maps/org/название/1234567890/"
               class="url-input"
-              :disabled="orgStore.loading || orgStore.parsing"
+              :disabled="orgStore.loading || isProcessing"
             />
             <button
               type="submit"
               class="btn-primary"
-              :disabled="orgStore.loading || orgStore.parsing || !urlInput"
+              :disabled="orgStore.loading || isProcessing || !urlInput"
             >
               Сохранить
             </button>
@@ -43,14 +42,13 @@
           <div v-if="saveSuccess" class="success-alert">Ссылка сохранена</div>
         </form>
 
-        <!-- Org info and parse button -->
         <div v-if="org" class="org-section">
           <div class="org-meta">
             <div v-if="org.name" class="org-name">{{ org.name }}</div>
             <div class="org-url-display">{{ org.url }}</div>
           </div>
 
-          <div v-if="org.parse_status === 'done'" class="stats-row">
+          <div v-if="org.rating !== null || org.reviews_count !== null" class="stats-row">
             <div class="stat-card">
               <div class="stat-value">{{ org.rating?.toFixed(1) ?? '—' }}</div>
               <div class="stat-label">Средний рейтинг</div>
@@ -59,16 +57,12 @@
               </div>
             </div>
             <div class="stat-card">
-              <div class="stat-value">{{ org.reviews_count ?? '—' }}</div>
+              <div class="stat-value">{{ org.reviews_count?.toLocaleString('ru-RU') ?? '—' }}</div>
               <div class="stat-label">Отзывов</div>
             </div>
             <div class="stat-card">
-              <div class="stat-value">{{ org.ratings_count ?? '—' }}</div>
+              <div class="stat-value">{{ org.ratings_count?.toLocaleString('ru-RU') ?? '—' }}</div>
               <div class="stat-label">Оценок</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-value">{{ localReviewsCount }}</div>
-              <div class="stat-label">Загружено</div>
             </div>
           </div>
 
@@ -83,10 +77,10 @@
             <button
               @click="handleParse"
               class="btn-parse"
-              :disabled="orgStore.parsing || org.parse_status === 'processing'"
+              :disabled="orgStore.parsing || isProcessing"
             >
-              <span v-if="orgStore.parsing || org.parse_status === 'processing'" class="spinner-sm"></span>
-              <span v-if="orgStore.parsing || org.parse_status === 'processing'">Загружаем отзывы...</span>
+              <span v-if="orgStore.parsing || isProcessing" class="spinner-sm"></span>
+              <span v-if="orgStore.parsing || isProcessing">Загружаем отзывы...</span>
               <span v-else-if="org.parse_status === 'done'">Обновить отзывы</span>
               <span v-else>Загрузить отзывы</span>
             </button>
@@ -94,13 +88,16 @@
         </div>
       </section>
 
-      <!-- Reviews Section -->
-      <section v-if="org?.parse_status === 'done'" class="reviews-section">
+      <section v-if="reviews.length > 0 || (isProcessing && !reviewsError)" class="reviews-section">
         <div class="reviews-header">
-          <h2>Отзывы <span class="reviews-count">{{ totalReviews }}</span></h2>
+          <h2>Отзывы <span class="reviews-count">{{ org?.reviews_count?.toLocaleString('ru-RU') ?? '' }}</span></h2>
+          <div v-if="isProcessing" class="loading-more">
+            <span class="spinner-sm"></span>
+            <span>Подгружаем ещё...</span>
+          </div>
         </div>
 
-        <div v-if="reviewsLoading" class="loading-state">
+        <div v-if="reviewsLoading && reviews.length === 0" class="loading-state">
           <div class="spinner"></div>
           <p>Загружаем отзывы...</p>
         </div>
@@ -133,117 +130,119 @@ import ReviewCard from '@/components/ReviewCard.vue';
 import Pagination from '@/components/Pagination.vue';
 import api from '@/api/axios';
 
-const router = useRouter();
-const auth = useAuthStore();
+const router   = useRouter();
+const auth     = useAuthStore();
 const orgStore = useOrganizationStore();
 
-const org = computed(() => orgStore.organization);
-const urlInput = ref('');
-const saveError = ref('');
+const org         = computed(() => orgStore.organization);
+const isProcessing = computed(() => org.value?.parse_status === 'processing');
+
+const urlInput   = ref('');
+const saveError  = ref('');
 const saveSuccess = ref(false);
 
-const reviews = ref([]);
-const totalReviews = ref(0);
-const localReviewsCount = ref(0);
-const currentPage = ref(1);
-const lastPage = ref(1);
+const reviews       = ref([]);
+const currentPage   = ref(1);
+const lastPage      = ref(1);
 const reviewsLoading = ref(false);
-const reviewsError = ref('');
+const reviewsError   = ref('');
 
 let pollInterval = null;
 
 function startPolling() {
-  if (pollInterval) return;
-  pollInterval = setInterval(async () => {
-    await orgStore.fetch();
-    if (org.value?.parse_status === 'done') {
-      stopPolling();
-      await loadReviews(1);
-    } else if (org.value?.parse_status === 'error') {
-      stopPolling();
-    }
-  }, 5000);
+    if (pollInterval) return;
+    pollInterval = setInterval(async () => {
+        await orgStore.fetch();
+        const status = org.value?.parse_status;
+        if (status === 'processing' || status === 'done') {
+            await loadReviews(currentPage.value);
+        }
+        if (status !== 'processing') {
+            stopPolling();
+        }
+    }, 4000);
 }
 
 function stopPolling() {
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
 }
 
-onUnmounted(() => stopPolling());
+onUnmounted(stopPolling);
 
 onMounted(async () => {
-  await orgStore.fetch();
-  if (org.value) {
-    urlInput.value = org.value.url;
-    if (org.value.parse_status === 'done') {
-      await loadReviews(1);
-    } else if (org.value.parse_status === 'processing') {
-      startPolling();
+    await orgStore.fetch();
+    if (org.value) {
+        urlInput.value = org.value.url;
+        if (org.value.parse_status === 'done' || org.value.parse_status === 'processing') {
+            await loadReviews(1);
+        }
+        if (org.value.parse_status === 'processing') {
+            startPolling();
+        }
     }
-  }
 });
 
 async function handleSave() {
-  saveError.value = '';
-  saveSuccess.value = false;
-  try {
-    await orgStore.save(urlInput.value);
-    saveSuccess.value = true;
-    setTimeout(() => { saveSuccess.value = false; }, 3000);
-  } catch (e) {
-    saveError.value = e.message;
-  }
+    saveError.value  = '';
+    saveSuccess.value = false;
+    try {
+        await orgStore.save(urlInput.value);
+        saveSuccess.value = true;
+        reviews.value  = [];
+        currentPage.value = 1;
+        lastPage.value = 1;
+        setTimeout(() => { saveSuccess.value = false; }, 3000);
+    } catch (e) {
+        saveError.value = e.message;
+    }
 }
 
 async function handleParse() {
-  try {
-    await orgStore.parse();
-    // parse now dispatches job and returns 202 — start polling for completion
-    if (org.value?.parse_status === 'processing') {
-      startPolling();
-    } else if (org.value?.parse_status === 'done') {
-      await loadReviews(1);
-    }
-  } catch (e) {
-    // error shown in org section
-  }
+    try {
+        await orgStore.parse();
+        if (isProcessing.value) {
+            startPolling();
+        } else if (org.value?.parse_status === 'done') {
+            await loadReviews(1);
+        }
+    } catch (_) {}
 }
 
 async function loadReviews(page) {
-  reviewsLoading.value = true;
-  reviewsError.value = '';
-  try {
-    const { data } = await api.get('/reviews', { params: { page } });
-    reviews.value = data.data;
-    totalReviews.value = data.total;
-    localReviewsCount.value = data.total;
-    currentPage.value = data.current_page;
-    lastPage.value = data.last_page;
-  } catch (e) {
-    reviewsError.value = e.response?.data?.message || 'Ошибка загрузки отзывов';
-  } finally {
-    reviewsLoading.value = false;
-  }
+    reviewsLoading.value = true;
+    reviewsError.value   = '';
+    try {
+        const { data } = await api.get('/reviews', { params: { page } });
+        reviews.value     = data.data;
+        currentPage.value = data.current_page;
+        lastPage.value    = data.last_page;
+    } catch (e) {
+        if (e.response?.status !== 404) {
+            reviewsError.value = e.response?.data?.message || 'Ошибка загрузки отзывов';
+        }
+    } finally {
+        reviewsLoading.value = false;
+    }
 }
 
 async function goToPage(page) {
-  await loadReviews(page);
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+    await loadReviews(page);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 async function handleLogout() {
-  await auth.logout();
-  router.push('/');
+    await auth.logout();
+    router.push('/');
 }
 
 function formatDate(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('ru-RU', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
+    if (!iso) return '';
+    return new Date(iso).toLocaleString('ru-RU', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+    });
 }
 </script>
