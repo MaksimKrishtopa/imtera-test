@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\ParseOrganizationJob;
 use App\Models\Organization;
 use App\Services\YandexMapsParser;
 use Illuminate\Http\JsonResponse;
@@ -80,7 +79,18 @@ class OrganizationController extends Controller
 
         $org->update(['parse_status' => 'processing', 'parse_error' => null]);
 
-        ParseOrganizationJob::dispatch($org);
+        // Spawn a background PHP process so the HTTP response returns immediately.
+        $artisan = PHP_OS_FAMILY === 'Windows'
+            ? '"' . PHP_BINARY . '" "' . base_path('artisan') . '"'
+            : PHP_BINARY . ' ' . base_path('artisan');
+
+        $cmd = $artisan . ' app:parse-org ' . $org->id;
+
+        if (PHP_OS_FAMILY === 'Windows') {
+            pclose(popen('start /B ' . $cmd . ' > NUL 2>&1', 'r'));
+        } else {
+            exec($cmd . ' > /tmp/parse-org-' . $org->id . '.log 2>&1 &');
+        }
 
         return response()->json($this->formatOrganization($org->refresh()), 202);
     }
