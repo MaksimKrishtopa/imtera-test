@@ -172,7 +172,7 @@ class YandexMapsParser
             );
         }
 
-        Log::info('Running node scraper', ['orgId' => $orgId, 'outFile' => $outFile]);
+        Log::info('Running node scraper', ['url' => $reviewsUrl, 'outFile' => $outFile]);
 
         $timeout = 450;
         $start = time();
