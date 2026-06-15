@@ -114,28 +114,11 @@ class YandexMapsParser
 
         $isWindows = PHP_OS_FAMILY === 'Windows';
 
-        if ($isWindows) {
-            $errFile = sys_get_temp_dir() . '\scraper-err-' . getmypid() . '.log';
-            $cmd = sprintf(
-                'node %s %s %s 2> %s',
-                escapeshellarg($scriptPath),
-                escapeshellarg($reviewsUrl),
-                escapeshellarg((string) $maxReviews),
-                escapeshellarg($errFile)
-            );
-        } else {
-            $cmd = sprintf(
-                'node %s %s %s 2>/dev/null',
-                escapeshellarg($scriptPath),
-                escapeshellarg($reviewsUrl),
-                escapeshellarg((string) $maxReviews)
-            );
-        }
+        $cmd = $isWindows
+            ? sprintf('node %s %s %s 2> NUL', escapeshellarg($scriptPath), escapeshellarg($reviewsUrl), escapeshellarg((string) $maxReviews))
+            : sprintf('node %s %s %s 2>/dev/null', escapeshellarg($scriptPath), escapeshellarg($reviewsUrl), escapeshellarg((string) $maxReviews));
 
-        $process = proc_open($cmd, [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-        ], $pipes, null);
+        $process = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes, null);
 
         if (!is_resource($process)) {
             throw new \RuntimeException('Не удалось запустить скрипт парсера.');
@@ -144,9 +127,10 @@ class YandexMapsParser
         fclose($pipes[0]);
         stream_set_blocking($pipes[1], false);
 
-        $timeout = 450;
-        $start   = time();
-        $buf     = '';
+        $timeout  = 450;
+        $start    = time();
+        $buf      = '';
+        $finished = false;
 
         while (true) {
             $status = proc_get_status($process);
@@ -157,11 +141,13 @@ class YandexMapsParser
                 while (($pos = strpos($buf, "\n")) !== false) {
                     $line = substr($buf, 0, $pos);
                     $buf  = substr($buf, $pos + 1);
-                    $this->processScraperLine($line, $onMessage);
+                    if ($this->processScraperLine($line, $onMessage)) {
+                        $finished = true;
+                    }
                 }
             }
 
-            if (!$status['running']) break;
+            if ($finished || !$status['running']) break;
 
             if (time() - $start > $timeout) {
                 proc_terminate($process);
@@ -179,22 +165,20 @@ class YandexMapsParser
         fclose($pipes[1]);
         proc_close($process);
 
-        foreach (explode("\n", $buf) as $line) {
-            $this->processScraperLine($line, $onMessage);
-        }
-
-        if ($isWindows && isset($errFile)) {
-            @unlink($errFile);
+        if (!$finished) {
+            foreach (explode("\n", $buf) as $line) {
+                $this->processScraperLine($line, $onMessage);
+            }
         }
     }
 
-    private function processScraperLine(string $line, callable $onMessage): void
+    private function processScraperLine(string $line, callable $onMessage): bool
     {
         $line = trim($line);
-        if (!$line || $line[0] !== '{') return;
+        if (!$line || $line[0] !== '{') return false;
 
         $data = json_decode($line, true);
-        if (!$data) return;
+        if (!$data) return false;
 
         if (isset($data['error'])) {
             throw new \RuntimeException('Ошибка парсера: ' . $data['error']);
@@ -203,7 +187,10 @@ class YandexMapsParser
         $type = $data['type'] ?? null;
         if ($type) {
             $onMessage($type, $data);
+            return $type === 'done';
         }
+
+        return false;
     }
 
     private function createReview(int $organizationId, array $data): void

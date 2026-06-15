@@ -252,7 +252,13 @@ async function scrapeReviews() {
         process.stdout.write(JSON.stringify({ type: 'done', total: reviewMap.size }) + '\n');
 
     } finally {
-        await browser.close();
+        // Yandex Maps keeps background connections open, so browser.close() can hang.
+        // Give it 3 seconds then force-exit — Node.js will clean up child processes.
+        await Promise.race([
+            browser.close(),
+            new Promise(resolve => setTimeout(resolve, 3000)),
+        ]);
+        process.exit(0);
     }
 }
 
